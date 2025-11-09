@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>S.I.I.E. - Evaluación de Calidad de Software</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="icon" type="image/png" href="favicon.png">
     <style>
         /* Custom styles for the font and smoother transitions */
         body {
@@ -77,8 +78,16 @@
         };
 
         // --- FIREBASE CONFIGURATION AND INITIALIZATION ---
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const appId = 'calidad-a071b';
+        const firebaseConfig = {
+            apiKey: "AIzaSyC-QJRIrNPovaa7KYhw2VS_Tq9pT8cqKW4",
+            authDomain: "calidad-a071b.firebaseapp.com",
+            projectId: "calidad-a071b",
+            storageBucket: "calidad-a071b.firebasestorage.app",
+            messagingSenderId: "741442529281",
+            appId: "1:741442529281:web:9ad63dd65ab0cdaf653800",
+            measurementId: "G-0DJ93V371Q"
+        };
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
         const getPublicCollectionPath = () => {
@@ -90,6 +99,7 @@
             if (!firebaseConfig) {
                 console.error("Firebase configuration is missing.");
                 isAuthReady = true;
+                renderApp();
                 return;
             }
             
@@ -102,28 +112,29 @@
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
-                    } else if (initialAuthToken) {
-                        // Sign in with custom token if available
-                        await signInWithCustomToken(auth, initialAuthToken).catch(e => {
-                            console.warn("Error signing in with custom token, signing in anonymously:", e);
-                            signInAnonymously(auth);
-                        });
-                        userId = auth.currentUser?.uid || crypto.randomUUID();
+                        console.log("Usuario autenticado:", userId);
                     } else {
                         // Default to anonymous sign-in
-                        await signInAnonymously(auth);
-                        userId = auth.currentUser?.uid || crypto.randomUUID();
+                        try {
+                            await signInAnonymously(auth);
+                            userId = auth.currentUser?.uid || crypto.randomUUID();
+                            console.log("Autenticación anónima exitosa:", userId);
+                        } catch (error) {
+                            console.error("Error en autenticación anónima:", error); // <-- Cae aquí por el 400
+                            userId = crypto.randomUUID(); // <-- Genera una ID temporal y no persistente
+                        }
                     }
                     isAuthReady = true;
                     console.log("User ID:", userId);
-                    loadHistoricalData(); // Load data once authenticated
-                    renderApp(); // Rerender when auth is ready
+                    loadHistoricalData();
+                    renderApp();
                 });
                 
             } catch (e) {
                 console.error("Error initializing Firebase:", e);
                 isAuthReady = true;
-                renderApp(); // Rerender even if failure
+                userId = crypto.randomUUID();
+                renderApp();
             }
         }
 
@@ -275,7 +286,14 @@
             };
             
             // 2. Save the current evaluation data to Firestore
-            await saveEvaluation(evaluationData); // This triggers onSnapshot, updating historicalAverage
+            // APLICAR TRY/CATCH para asegurar que la navegación se ejecute.
+            try {
+                await saveEvaluation(evaluationData); 
+            } catch (e) {
+                console.error("Error al guardar la evaluación en Firestore, pero se procederá a los resultados:", e);
+                // La función CONTINÚA después del error.
+            }
+
 
             // 3. Navigate to results
             activeSection = 'resultados';
@@ -669,7 +687,7 @@
                                         <div class="relative pt-[56.25%] rounded-lg overflow-hidden">
                                             <iframe 
                                                 class="absolute inset-0 w-full h-full rounded-lg"
-                                                src="https://www.youtube.com/embed/YOUTUBE_VIDEO_ID"
+                                                src="https://www.youtube.com/embed/-DEhD8H72_o"
                                                 title="Video explicativo del S.I.I.E."
                                                 frameborder="0"
                                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
