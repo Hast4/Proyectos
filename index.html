@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S.I.I.E. - Evaluación de Calidad de Software</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for the font and smoother transitions */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+        .slider-thumb::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #4f46e5;
+            cursor: pointer;
+            box-shadow: 0 0 0 4px #c7d2fe;
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .slider-thumb::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #4f46e5;
+            cursor: pointer;
+            box-shadow: 0 0 0 4px #c7d2fe;
+            transition: background 0.3s, box-shadow 0.3s;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="min-h-screen bg-gray-100">
+        </div>
+
+    <script type="module">
+        // --- FIREBASE IMPORTS ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, addDoc, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set log level to debug for easier debugging
+        setLogLevel('Debug');
+
+        // --- GLOBAL VARIABLES (State and Firebase) ---
+        let db, auth;
+        let userId = null; // Will be set after authentication
+        let isAuthReady = false;
+
+        let activeSection = 'inicio';
+        let menuOpen = false;
+        let evaluationResults = null;
+        let historicalAverage = null;
+        let historicalCount = 0;
+        let tutorialStep = 0; // Used for the Pruebas/Tutorial section
+
+        let evaluationData = {
+            funcionalidad: 3.5,
+            fiabilidad: 4.0,
+            usabilidad: 3.0,
+            eficiencia: 2.5,
+            mantenibilidad: 3.5,
+            portabilidad: 4.0
+        };
+
+        let metricsData = {
+            linesOfCode: 1500,
+            defectos: 15,
+            testCoverage: 80,
+            codeComplexity: 12
+        };
+
+        // --- FIREBASE CONFIGURATION AND INITIALIZATION ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        const getPublicCollectionPath = () => {
+            // Public data path: artifacts/{appId}/public/data/evaluations
+            return `artifacts/${appId}/public/data/evaluations`;
+        };
+
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase configuration is missing.");
+                isAuthReady = true;
+                return;
+            }
+            
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Authenticate and set up auth listener
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                    } else if (initialAuthToken) {
+                        // Sign in with custom token if available
+                        await signInWithCustomToken(auth, initialAuthToken).catch(e => {
+                            console.warn("Error signing in with custom token, signing in anonymously:", e);
+                            signInAnonymously(auth);
+                        });
+                        userId = auth.currentUser?.uid || crypto.randomUUID();
+                    } else {
+                        // Default to anonymous sign-in
+                        await signInAnonymously(auth);
+                        userId = auth.currentUser?.uid || crypto.randomUUID();
+                    }
+                    isAuthReady = true;
+                    console.log("User ID:", userId);
+                    loadHistoricalData(); // Load data once authenticated
+                    renderApp(); // Rerender when auth is ready
+                });
+                
+            } catch (e) {
+                console.error("Error initializing Firebase:", e);
+                isAuthReady = true;
+                renderApp(); // Rerender even if failure
+            }
+        }
+
+        // --- DATA PERSISTENCE & LOADING ---
+
+        // Function to load all evaluations and calculate the historical average (Real-time)
+        const loadHistoricalData = () => {
+            if (!isAuthReady || !db) return;
+
+            const evaluationsRef = collection(db, getPublicCollectionPath());
+            const q = query(evaluationsRef);
+
+            // Use onSnapshot for real-time updates
+            onSnapshot(q, (snapshot) => {
+                let totalScoreSum = 0;
+                let evaluationCount = 0;
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    
+                    // Calculate the total score for this single evaluation
+                    const scores = Object.values(data.evaluationData || {});
+                    const singleTotal = scores.reduce((a, b) => a + b, 0);
+                    
+                    // Only count valid 6-factor evaluations
+                    if (scores.length === 6 && singleTotal > 0) {
+                        const singleAverage = singleTotal / 6;
+                        totalScoreSum += singleAverage;
+                        evaluationCount++;
+                    }
+                });
+
+                historicalCount = evaluationCount;
+
+                if (evaluationCount > 0) {
+                    historicalAverage = (totalScoreSum / evaluationCount).toFixed(2);
+                } else {
+                    historicalAverage = null; // No data yet
+                }
+                
+                console.log(`Historical Average Updated: ${historicalAverage} from ${historicalCount} evaluations.`);
+                // If the user is on the results page, force a re-render
+                if (activeSection === 'resultados') {
+                    renderApp();
+                }
+
+            }, (error) => {
+                console.error("Error fetching historical data:", error);
+            });
+        };
+
+        // Function to save the current evaluation to Firestore
+        const saveEvaluation = async (data) => {
+            if (!isAuthReady || !db) {
+                console.error("Firebase not ready or DB not initialized.");
+                return false;
+            }
+
+            try {
+                await addDoc(collection(db, getPublicCollectionPath()), {
+                    userId: userId,
+                    timestamp: serverTimestamp(),
+                    evaluationData: data, // Save the 6 characteristics
+                    metricsData: metricsData // Also save the current metrics for context
+                });
+                console.log("Document successfully written.");
+                return true;
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                return false;
+            }
+        };
+
+        // --- DEFINICIONES DE ICONOS SVG ---
+
+        // Función de utilidad para generar un SVG de Lucide
+        const getIconSVG = (iconName, size = 24, className = "") => {
+            let path = "";
+            switch (iconName) {
+                // Existing Icons
+                case 'BookOpen': path = 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15ZM20 22v-2H6.5a2.5 2.5 0 0 1 0-5H20'; break;
+                case 'Calculator': path = 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM18 16h-4v4h4zM14 12h-4v4h4zM10 12H6v4h4zM14 8h-4v4h4zM10 8H6v4h4zM10 4h4v4h-4z'; break; 
+                case 'BarChart3': path = 'M3 3v18h18M18 17V9m-6 8V5m-6 12v-2'; break;
+                case 'Menu': path = 'M3 12h18M3 6h18M3 18h18'; break;
+                case 'X': path = 'M18 6L6 18M6 6l12 12'; break;
+                case 'TrendingUp': path = 'M10 17l6-6 4 4V10m-8-2l4 4 4-4V4'; break;
+                case 'GraduationCap': path = 'M22 10V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v4M12 14l9-5M3 9l9 5 9-5V6M12 14v8'; break; 
+                // New Icons for ACA Project
+                case 'FileText': path = 'M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2zM14 2v5h5M10 10h4M10 14h4M10 18h4'; break;
+                case 'Target': path = 'M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z'; break;
+                case 'Video': path = 'M2 12a10 10 0 1 0 20 0 10 10 0 0 0-20 0Z M10 8l6 4-6 4z'; break;
+                case 'Info': path = 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z M12 16v-4m0-4h.01'; break; // Nuevo icono de informacion
+                default: path = 'M0 0h24v24H0z'; // Fallback
+            }
+            return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${className}">
+                <path d="${path}"/>
+            </svg>`;
+        };
+
+        // --- LÓGICA DE CÁLCULO Y GUARDADO ---
+
+        const calculateMetrics = () => {
+            const { linesOfCode, defectos, testCoverage, codeComplexity } = metricsData;
+            
+            // Densidad de Defectos por mil líneas de código
+            const defectDensity = (defectos / linesOfCode * 1000).toFixed(2);
+            
+            // Puntuación de Calidad Agregada (Fórmula simplificada)
+            const qualityScore = (
+                (testCoverage * 0.4) + 
+                (Math.max(0, 50 - codeComplexity) * 2 * 0.3) +
+                ((linesOfCode / 1000) * defectos > 10 ? 0 : 30) 
+            );
+            
+            let maintainability = 'Alta';
+            if (codeComplexity > 20) maintainability = 'Baja';
+            else if (codeComplexity > 10) maintainability = 'Media';
+
+            const reliability = (100 - (defectos / linesOfCode * 100)).toFixed(1);
+            
+            return {
+                defectDensity,
+                qualityScore: Math.max(0, Math.min(100, qualityScore)).toFixed(2),
+                maintainability,
+                reliability
+            };
+        };
+
+        // This function now calculates the *current* score and saves it to Firestore.
+        window.calculateQuality = async () => {
+            // 1. Calculate the CURRENT evaluation result
+            const total = Object.values(evaluationData).reduce((a, b) => a + b, 0);
+            const average = (total / 6).toFixed(2);
+            const avgFloat = parseFloat(average);
+
+            let classification = '';
+            if (avgFloat >= 4.5) classification = 'Excelente';
+            else if (avgFloat >= 3.5) classification = 'Buena';
+            else if (avgFloat >= 2.5) classification = 'Aceptable';
+            else if (avgFloat >= 1.5) classification = 'Deficiente';
+            else classification = 'Muy Deficiente';
+
+            // Store the results of the currently submitted evaluation for display
+            evaluationResults = {
+                total: average,
+                percentage: ((avgFloat / 5) * 100).toFixed(1),
+                classification,
+                details: {...evaluationData}
+            };
+            
+            // 2. Save the current evaluation data to Firestore
+            await saveEvaluation(evaluationData); // This triggers onSnapshot, updating historicalAverage
+
+            // 3. Navigate to results
+            activeSection = 'resultados';
+            renderApp();
+        };
+
+        // --- FUNCIÓN DE RENDERIZADO DE COMPONENTES ---
+
+        // Genera el HTML para una Tarjeta de Información
+        const Card = (title, iconName, color, childrenHtml) => `
+            <div class="bg-${color}-50 p-6 rounded-xl border border-${color}-200 shadow-md">
+                ${getIconSVG(iconName, 32, `text-${color}-600 mb-3`)}
+                <h3 class="text-xl font-bold text-gray-900 mb-3">${title}</h3>
+                <ul class="text-sm text-gray-700 space-y-2 list-disc list-inside">
+                    ${childrenHtml}
+                </ul>
+            </div>
+        `;
+
+        // Genera el HTML para un Slider de Métrica
+        const MetricSlider = (label, min, max, step, value, stateKey) => `
+            <div>
+                <label class="block font-bold text-gray-700 mb-2">${label}: <span id="metric-value-${stateKey}">${value}</span></label>
+                <input
+                    type="range"
+                    min="${min}" max="${max}" step="${step}"
+                    value="${value}"
+                    data-state-key="${stateKey}"
+                    oninput="handleMetricChange(this)"
+                    class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider-thumb"
+                />
+            </div>
+        `;
+
+        // Genera el HTML para la Caja de Resultados
+        const ResultBox = (title, value, unit, detail, bgColor, textColor) => `
+            <div class="${bgColor} p-4 rounded-lg flex justify-between items-center shadow-sm">
+                <div>
+                    <h4 class="${textColor} font-semibold text-lg">${title}</h4>
+                    <p class="text-xs text-gray-500">${detail}</p>
+                </div>
+                <p class="text-4xl font-extrabold ${textColor}">
+                    ${value}
+                    ${unit ? `<span class="text-sm font-normal ml-1">${unit}</span>` : ''}
+                </p>
+            </div>
+        `;
+
+        // Genera el HTML para el Slider de Evaluación ISO 25010
+        const EvaluationSlider = (label, description, value, stateKey) => `
+            <div class="border-b pb-4">
+                <div class="flex justify-between items-center mb-2">
+                    <div class="flex flex-col">
+                        <label class="font-bold text-gray-700">${label}</label>
+                        <span class="text-xs text-gray-500 italic mt-1">${description}</span>
+                    </div>
+                    <span id="evaluation-value-${stateKey}" class="text-3xl font-extrabold text-blue-600 w-16 text-right">${value.toFixed(1)}</span>
+                </div>
+                <input
+                    type="range"
+                    min="0" max="5" step="0.1"
+                    value="${value}"
+                    data-state-key="${stateKey}"
+                    oninput="handleEvaluationChange(this)"
+                    class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider-thumb"
+                />
+            </div>
+        `;
+
+        // Genera el HTML para la Barra de Calidad de Resultados
+        const QualityBar = (characteristic, score) => {
+            const percentage = (score / 5) * 100;
+            const color = score >= 4 ? 'bg-green-500' : score >= 3 ? 'bg-blue-500' : 'bg-yellow-500';
+            return `
+                <div class="flex flex-col sm:flex-row sm:items-center">
+                    <span class="font-semibold capitalize text-gray-700 w-full sm:w-48 mb-1 sm:mb-0">${characteristic}</span>
+                    <div class="flex items-center w-full">
+                        <div class="w-full bg-gray-200 rounded-full h-4 mr-3">
+                            <div
+                                class="h-4 rounded-full transition-all duration-700 ${color}"
+                                style="width: ${percentage}%"
+                            ></div>
+                        </div>
+                        <span class="text-lg font-bold w-12 text-right">${score.toFixed(1)}/5</span>
+                    </div>
+                </div>
+            `;
+        };
+
+        // --- MANEJADORES DE EVENTOS ---
+
+        window.handleMetricChange = (input) => {
+            const key = input.dataset.stateKey;
+            const value = parseInt(input.value);
+            metricsData[key] = value;
+            document.getElementById(`metric-value-${key}`).textContent = value;
+            if (activeSection === 'metricas') {
+                document.querySelector('main').innerHTML = renderContent();
+            }
+        };
+
+        window.handleEvaluationChange = (input) => {
+            const key = input.dataset.stateKey;
+            const value = parseFloat(input.value);
+            evaluationData[key] = value;
+            document.getElementById(`evaluation-value-${key}`).textContent = value.toFixed(1);
+        };
+
+        window.setActiveSectionAndRender = (section) => {
+            activeSection = section;
+            menuOpen = false; 
+            renderApp();
+        };
+
+        window.toggleMenu = () => {
+            menuOpen = !menuOpen;
+            renderApp();
+        };
+
+        window.setTutorialStepAndRender = (step) => {
+            tutorialStep = step;
+            document.querySelector('main').innerHTML = renderContent();
+        };
+
+
+        // --- FUNCIÓN DE RENDERIZADO DE CONTENIDO PRINCIPAL ---
+        const renderContent = () => {
+            let contentHTML = '';
+
+            if (activeSection === 'inicio') {
+                contentHTML = `
+                    <div class="space-y-8 p-4 md:p-8">
+                        <div class="bg-gradient-to-r from-blue-700 to-purple-700 text-white p-8 rounded-xl shadow-2xl">
+                            ${getIconSVG('TrendingUp', 48, 'mb-4')}
+                            <h1 class="text-4xl sm:text-5xl font-extrabold mb-2">Proyecto Final: Calidad de Software</h1>
+                            <p class="text-xl sm:text-2xl font-light">Sistema Integral Interactivo de Evaluacion (S.I.I.E.)</p>
+                        </div>
+
+                        <div class="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+                            <h2 class="text-2xl font-bold text-gray-800 mb-4 flex items-center">
+                                ${getIconSVG('BookOpen', 24, 'mr-3 text-blue-600')}
+                                Contexto y Definición
+                            </h2>
+                            <p class="text-gray-700 leading-relaxed text-md mb-4">
+                                La calidad del software es el conjunto de características que determinan qué tan bien un sistema cumple con los requisitos funcionales (lo que debe hacer) y no funcionales (cómo lo hace). Este aplicativo web —S.I.I.E., Sistema Integral Interactivo de Evaluación— se ha diseñado como una herramienta educativa que permite comprender y aplicar los principios de calidad de software en entornos académicos y reales.
+                            </p>
+                            <p class="text-gray-700 leading-relaxed text-md mb-4">
+                                A través del S.I.I.E. se busca evaluar de manera cuantitativa y visual la calidad de un sistema, mostrando los beneficios de las buenas prácticas de desarrollo, como el uso de normas, modelos, métricas y pruebas. Esto permite mejorar la comprensión de los factores que influyen directamente en la fiabilidad, mantenibilidad y eficiencia del software.
+                            </p>
+                        </div>
+
+                        <div class="grid md:grid-cols-3 gap-6">
+                            ${Card('Beneficios Clave', 'TrendingUp', 'blue', `
+                                <li>Reduce costos de mantenimiento</li>
+                                <li>Mejora la satisfaccion del usuario</li>
+                                <li>Asegura la trazabilidad y el cumplimiento</li>
+                            `)}
+                            ${Card('Aplicación Educativa', 'GraduationCap', 'green', `
+                                <li>Fomenta mejores practicas de programacion</li>
+                                <li>Herramienta practica para la enseñanza de normas</li>
+                                <li>Prepara al estudiante para el ambiente real</li>
+                            `)}
+                            ${Card('Aplicación Real', 'Calculator', 'purple', `
+                                <li>Soporte a la toma de decisiones tecnicas</li>
+                                <li>Diagnostico rapido de la salud del codigo</li>
+                                <li>Minimiza riesgos criticos de negocio</li>
+                            `)}
+                        </div>
+                    </div>
+                `;
+            } else if (activeSection === 'normas') {
+                 contentHTML = `
+                    <div class="space-y-6 p-4 md:p-8">
+                        <h2 class="text-3xl font-bold text-gray-800">Normas, Modelos y Estándares</h2>
+
+                        <div class="bg-gradient-to-r from-teal-600 to-green-600 text-white p-6 rounded-xl shadow-xl">
+                            <h3 class="text-2xl font-bold mb-1">El Marco de la Calidad</h3>
+                            <p class="text-sm">Contextualizacion de la ISO 25010 y otros marcos</p>
+                        </div>
+
+                        <div class="grid lg:grid-cols-2 gap-6">
+                            <div class="bg-white p-6 rounded-xl shadow-lg">
+                                <h3 class="text-xl font-bold text-gray-800 mb-4 border-b pb-3">Norma ISO/IEC 25010 (SQuaRE)</h3>
+                                <p class="text-gray-700 mb-4">
+                                    Esta norma define un modelo de calidad que consta de ocho características principales. Nuestro sistema de evaluacion se enfoca en las 6 caracteristicas clave que son cuantificables.
+                                </p>
+                                <ul class="list-disc list-inside text-gray-600 space-y-2">
+                                    <li>Modelos: ISO/IEC 25010 (Modelo de calidad)</li>
+                                    <li>Características clave: Funcionalidad, Fiabilidad, Usabilidad, Eficiencia, Mantenibilidad, Portabilidad.</li>
+                                </ul>
+                            </div>
+                            <div class="bg-white p-6 rounded-xl shadow-lg">
+                                <h3 class="text-xl font-bold text-gray-800 mb-4 border-b pb-3">Estándares y Códigos</h3>
+                                <p class="text-gray-700 mb-4">
+                                    Los estandares de codificacion (e.g., MISRA, Google Style Guides) y el uso de patrones de diseno (e.g., MVC, Clean Architecture) impactan directamente en la Mantenibilidad y la Eficiencia del software.
+                                </p>
+                                <ul class="list-disc list-inside text-gray-600 space-y-2">
+                                    <li>Estándares de Codigo: Guías de estilo (e.g., camelCase, indentación).</li>
+                                    <li>Patrones de Diseno: Mejoran la estructura, la escalabilidad y la fiabilidad.</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (activeSection === 'metricas') {
+                const metrics = calculateMetrics();
+                contentHTML = `
+                    <div class="space-y-6 p-4 md:p-8">
+                        <h2 class="text-3xl font-bold text-gray-800">Calculadora de Metricas Tecnicas</h2>
+
+                        <div class="bg-gradient-to-r from-green-600 to-blue-600 text-white p-6 rounded-xl shadow-xl">
+                            <h3 class="text-2xl font-bold mb-1">Métricas en Tiempo Real</h3>
+                            <p class="text-sm">Ajusta los valores para ver el impacto en la calidad del codigo y la programacion</p>
+                        </div>
+
+                        <div class="grid lg:grid-cols-3 gap-6">
+                            <div class="lg:col-span-2 bg-white p-6 rounded-xl shadow-lg">
+                                <h3 class="text-xl font-bold text-gray-800 mb-6 border-b pb-3">Parametros del Codigo</h3>
+
+                                <div class="space-y-6">
+                                    ${MetricSlider('Lineas de Codigo (LOC)', '100', '10000', '100', metricsData.linesOfCode, 'linesOfCode')}
+                                    ${MetricSlider('Defectos Encontrados', '1', '100', '1', metricsData.defectos, 'defectos')}
+                                    ${MetricSlider('Cobertura de Pruebas (%)', '0', '100', '1', metricsData.testCoverage, 'testCoverage')}
+                                    ${MetricSlider('Complejidad Ciclomática (McCabe)', '1', '50', '1', metricsData.codeComplexity, 'codeComplexity')}
+                                </div>
+                                
+                                <div class="mt-8 bg-blue-50 p-4 rounded-xl border border-blue-200">
+                                    <h4 class="text-lg font-bold text-blue-800 mb-3 flex items-center">
+                                        ${getIconSVG('Info', 20, 'mr-2')}
+                                        Explicación de Parámetros
+                                    </h4>
+                                    <ul class="text-sm text-gray-700 space-y-3">
+                                        <li>
+                                            Lineas de Codigo (LOC): Es la cantidad total de líneas en el código fuente. Una cantidad muy alta sin un aumento en la complejidad o defectos puede indicar un bajo nivel de abstracción o redundancia.
+                                        </li>
+                                        <li>
+                                            Defectos Encontrados: El número de errores, fallos o bugs detectados. Una alta cantidad se relaciona directamente con una baja Fiabilidad y Mantenibilidad.
+                                        </li>
+                                        <li>
+                                            Cobertura de Pruebas (%): El porcentaje del código que ha sido ejecutado por pruebas automatizadas. Un valor alto (ej. +80%) es vital para garantizar la Fiabilidad del sistema.
+                                        </li>
+                                        <li>
+                                            Complejidad Ciclomática (McCabe): Mide la complejidad de un módulo o función. Un valor alto (ej. +10 o +15) significa que el código es difícil de probar y mantener, afectando la Mantenibilidad.
+                                        </li>
+                                    </ul>
+                                </div>
+                                </div>
+                            
+                            <div class="bg-gray-50 p-6 rounded-xl shadow-lg space-y-4">
+                                <h3 class="text-xl font-bold text-gray-800 mb-4 border-b pb-3">Resultados</h3>
+
+                                ${ResultBox('Puntuacion Global', metrics.qualityScore, '/100', 'Calidad Agregada', 'bg-green-100', 'text-green-700')}
+                                ${ResultBox('Densidad de Defectos', metrics.defectDensity, '/1000', 'Tasa de fallos por KLOC', 'bg-blue-100', 'text-blue-700')}
+                                ${ResultBox('Mantenibilidad', metrics.maintainability, '', 'Facilidad de cambio', 'bg-purple-100', 'text-purple-700')}
+                                ${ResultBox('Fiabilidad', metrics.reliability, '%', 'Probabilidad de fallo', 'bg-orange-100', 'text-orange-700')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (activeSection === 'evaluacion') {
+                contentHTML = `
+                    <div class="space-y-6 p-4 md:p-8">
+                        <h2 class="text-3xl font-bold text-gray-800">Evaluacion Dinamica ISO 25010 (Cuantitativa)</h2>
+
+                        <div class="bg-gradient-to-r from-purple-600 to-blue-600 text-white p-6 rounded-xl shadow-xl">
+                            <h3 class="text-2xl font-bold mb-1">Evaluacion de Caracteristicas de Software</h3>
+                            <p class="text-sm">Escala de 0 a 5 para cada caracteristica. Los resultados se guardarán públicamente.</p>
+                        </div>
+                        
+                        ${!isAuthReady ? `
+                            <div class="bg-yellow-100 p-4 rounded-lg border-l-4 border-yellow-500 text-yellow-800 font-medium">
+                                Cargando autenticacion... Por favor espere.
+                            </div>
+                        ` : ''}
+
+                        <div class="bg-white p-6 rounded-xl shadow-lg">
+                            <div class="space-y-8">
+                                ${EvaluationSlider("Funcionalidad", "Funciones que satisfacen las necesidades", evaluationData.funcionalidad, "funcionalidad")}
+                                ${EvaluationSlider("Fiabilidad", "Capacidad de mantener el rendimiento (estabilidad)", evaluationData.fiabilidad, "fiabilidad")}
+                                ${EvaluationSlider("Usabilidad", "Facilidad de uso y aprendizaje", evaluationData.usabilidad, "usabilidad")}
+                                ${EvaluationSlider("Eficiencia", "Rendimiento vs recursos usados (tiempo de respuesta)", evaluationData.eficiencia, "eficiencia")}
+                                ${EvaluationSlider("Mantenibilidad", "Facilidad de modificacion, prueba y correccion", evaluationData.mantenibilidad, "mantenibilidad")}
+                                ${EvaluationSlider("Portabilidad", "Transferencia entre entornos", evaluationData.portabilidad, "portabilidad")}
+                            </div>
+
+                            <button
+                                onclick="calculateQuality()"
+                                ${!isAuthReady ? 'disabled' : ''}
+                                class="mt-10 w-full bg-gradient-to-r from-purple-600 to-blue-600 text-white py-4 px-6 rounded-xl font-bold text-lg hover:from-purple-700 hover:to-blue-700 transition duration-300 shadow-lg disabled:opacity-50"
+                            >
+                                ${getIconSVG('BarChart3', 20, 'inline mr-2')} Calcular Calidad y Guardar Resultados
+                            </button>
+                            <p class="text-center text-sm text-gray-500 mt-2">Su evaluacion se guardara bajo el ID de usuario: **${userId || 'Cargando...'}**</p>
+                        </div>
+                    </div>
+                `;
+            } else if (activeSection === 'resultados') {
+                const globalAverage = historicalAverage || (evaluationResults ? evaluationResults.total : 'N/A');
+                let globalClassification = '';
+                const avgFloat = parseFloat(globalAverage);
+                if (avgFloat >= 4.5) globalClassification = 'Excelente';
+                else if (avgFloat >= 3.5) globalClassification = 'Buena';
+                else if (avgFloat >= 2.5) globalClassification = 'Aceptable';
+                else if (avgFloat >= 1.5) globalClassification = 'Deficiente';
+                else globalClassification = 'Sin Datos';
+
+                let classificationColor = 'text-gray-700';
+                if (globalClassification === 'Excelente') classificationColor = 'text-green-700';
+                else if (globalClassification === 'Buena') classificationColor = 'text-blue-700';
+                else if (globalClassification === 'Aceptable') classificationColor = 'text-yellow-700';
+                else if (globalClassification === 'Deficiente') classificationColor = 'text-red-700';
+                
+                contentHTML = `
+                    <div class="space-y-6 p-4 md:p-8">
+                        <h2 class="text-3xl font-bold text-gray-800">Resultados Globales e Historicos</h2>
+
+                        <div class="bg-gradient-to-r from-green-600 to-teal-600 text-white p-8 rounded-xl shadow-2xl text-center">
+                            <p class="text-lg font-light mb-2">Promedio Cuantitativo Histórico Público (${historicalCount} Evaluaciones)</p>
+                            <h3 class="text-5xl font-extrabold mb-1">${globalAverage}/5</h3>
+                            <div class="mt-3 inline-block px-4 py-1 rounded-full text-sm font-bold bg-white ${classificationColor}">
+                                Clasificacion: ${globalClassification}
+                            </div>
+                            ${!historicalAverage ? '<p class="text-yellow-100 mt-3">Aun no hay suficientes evaluaciones para un promedio historico robusto.</p>' : ''}
+                        </div>
+
+                        ${evaluationResults ? `
+                            <div class="bg-white p-6 rounded-xl shadow-lg border-t-4 border-blue-500">
+                                <h3 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-3">Su Última Evaluación</h3>
+                                <p class="text-lg font-semibold text-gray-700 mb-4">Puntuación: ${evaluationResults.total}/5 (${evaluationResults.percentage}%)</p>
+                                <div class="space-y-4">
+                                    ${Object.entries(evaluationResults.details).map(([key, value]) => QualityBar(key, value)).join('')}
+                                </div>
+                            </div>
+                        ` : `
+                            <div class="bg-yellow-100 p-8 rounded-xl shadow-lg border-l-4 border-yellow-500 max-w-lg mx-auto">
+                                <p class="text-xl font-semibold text-yellow-800">Realice una Evaluación para ver el desglose.</p>
+                                <button
+                                    onclick="setActiveSectionAndRender('evaluacion')"
+                                    class="mt-6 bg-yellow-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-yellow-700 transition shadow-md"
+                                >
+                                    Ir a Evaluación ISO 25010
+                                </button>
+                            </div>
+                        `}
+                    </div>
+                `;
+            } else if (activeSection === 'recomendaciones') {
+                contentHTML = `
+                    <div class="space-y-6 p-4 md:p-8">
+                        <h2 class="text-3xl font-bold text-gray-800">Conclusiones y Recomendaciones</h2>
+
+                        <div class="bg-gradient-to-r from-orange-600 to-red-600 text-white p-6 rounded-xl shadow-xl">
+                            <h3 class="text-2xl font-bold mb-1">Mejora Continua</h3>
+                            <p class="text-sm">Acciones concretas para subir la calificación de calidad</p>
+                        </div>
+
+                        <div class="grid md:grid-cols-2 gap-6">
+                            <div class="bg-white p-6 rounded-xl shadow-lg">
+                                <h3 class="text-xl font-bold text-gray-800 mb-4 border-b pb-3">Conclusiones del S.I.I.E.</h3>
+                                <p class="text-gray-700">
+                                    El uso de una herramienta cuantitativa como esta permite a los equipos (o estudiantes) identificar debilidades objetivas. La calidad no es solo la ausencia de bugs, sino la eficiencia, mantenibilidad y usabilidad del sistema a largo plazo.
+                                </p>
+                            </div>
+                            <div class="bg-white p-6 rounded-xl shadow-lg">
+                                <h3 class="text-xl font-bold text-gray-800 mb-4 border-b pb-3">Recomendaciones Clave</h3>
+                                <ul class="list-disc list-inside text-gray-700 space-y-2">
+                                    <li>Cobertura de Pruebas: Asegurar el 80% o más para la Fiabilidad.</li>
+                                    <li>Complejidad: Mantener la complejidad ciclomática por debajo de 10 por módulo.</li>
+                                    <li>Documentacion: Elaborar un documento del proyecto bajo Normas APA (como se requiere en el ACA).</li>
+                                    <li>Revisión de Código: Implementar revisiones de pares para encontrar defectos tempranamente.</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }  else if (activeSection === 'video') {
+                        contentHTML = `
+                            <div class="space-y-6 p-4 md:p-8">
+                                <h2 class="text-3xl font-bold text-gray-800">Video Explicativo</h2>
+
+                                <div class="bg-gradient-to-r from-red-600 to-purple-600 text-white p-6 rounded-xl shadow-xl">
+                                    <h3 class="text-2xl font-bold mb-1">Importancia y Beneficios del Proyecto</h3>
+                                    <p class="text-sm">Video general explicativo del S.I.I.E.</p>
+                                </div>
+
+                                <div class="grid md:grid-cols-1 gap-6">
+                                    <div class="bg-white p-6 rounded-xl shadow-lg">
+                                        <h3 class="text-xl font-bold text-gray-800 mb-4">
+                                            Video Explicativo General del Proyecto S.I.I.E.
+                                        </h3>
+                                        <div class="relative pt-[56.25%] rounded-lg overflow-hidden">
+                                            <iframe 
+                                                class="absolute inset-0 w-full h-full rounded-lg"
+                                                src="https://www.youtube.com/embed/YOUTUBE_VIDEO_ID"
+                                                title="Video explicativo del S.I.I.E."
+                                                frameborder="0"
+                                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                                allowfullscreen>
+                                            </iframe>
+                                        </div>
+                                        <p class="text-xs text-gray-500 mt-2">
+                                            Video oficial del proyecto final: S.I.I.E. — Evaluación de Calidad de Software.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+            } else if (activeSection === 'pruebas') {
+                const steps = [
+                    { title: "Paso 1: Definición de Casos", content: "Defina los casos de uso y casos de prueba que cubran el 100% de los requisitos funcionales del aplicativo (entorno educativo)." },
+                    { title: "Paso 2: Pruebas Unitarias", content: "Implemente pruebas automatizadas para cada función o clase de su código. Esto asegura que cada unidad funcione correctamente de forma aislada." },
+                    { title: "Paso 3: Pruebas de Integración", content: "Verifique que los módulos del aplicativo interactúen correctamente (ej. la base de datos se conecta, el formulario envía datos correctamente)." },
+                    { title: "Paso 4: Evaluación de Usabilidad", content: "Realice pruebas A/B o encuestas a usuarios para evaluar la facilidad de uso del aplicativo." },
+                    { title: "Paso 5: Documento Final", content: "Elabore el documento del proyecto bajo Normas APA en formato PDF, incluyendo el link público de este aplicativo." },
+                    { title: "Paso 6: Calificación", content: "Utilice la sección de Evaluación (ISO 25010) para obtener una calificación final cuantitativa (0 a 5) basada en los resultados de sus pruebas." }
+                ];
+                
+                const currentStep = steps[tutorialStep];
+                
+                contentHTML = `
+                    <div class="space-y-6 p-4 md:p-8">
+                        <h2 class="text-3xl font-bold text-gray-800">Pruebas, Evaluación y Documentación</h2>
+
+                        <div class="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-6 rounded-xl shadow-xl">
+                            <h3 class="text-2xl font-bold mb-1">Metodología de Pruebas (ACA Final)</h3>
+                            <p class="text-sm">Pasos para la evaluacion de un aplicativo de entorno educativo.</p>
+                        </div>
+
+                        <div class="bg-white p-8 rounded-xl shadow-lg">
+                            <div class="flex justify-center mb-6">
+                                <div class="flex space-x-2">
+                                    ${steps.map((_, index) => `
+                                        <div
+                                            onclick="setTutorialStepAndRender(${index})"
+                                            class="w-4 h-4 rounded-full cursor-pointer transition-all duration-300 
+                                            ${index === tutorialStep ? 'bg-purple-600 ring-4 ring-purple-300' : 'bg-gray-300 hover:bg-gray-400'}"
+                                        ></div>
+                                    `).join('')}
+                                </div>
+                            </div>
+
+                            <div class="min-h-[150px] flex flex-col justify-center">
+                                <h3 class="text-3xl font-bold text-purple-700 mb-4 text-center">
+                                    ${currentStep.title}
+                                </h3>
+                                <p class="text-gray-700 text-lg mb-6 text-center">
+                                    ${currentStep.content}
+                                </p>
+                            </div>
+
+                            <div class="flex justify-between mt-8">
+                                <button
+                                    onclick="setTutorialStepAndRender(Math.max(0, ${tutorialStep} - 1))"
+                                    ${tutorialStep === 0 ? 'disabled' : ''}
+                                    class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg font-semibold disabled:opacity-50 transition"
+                                >
+                                    Anterior
+                                </button>
+
+                                <button
+                                    onclick="setTutorialStepAndRender(Math.min(${steps.length - 1}, ${tutorialStep} + 1))"
+                                    ${tutorialStep === steps.length - 1 ? 'disabled' : ''}
+                                    class="px-6 py-2 bg-purple-600 text-white rounded-lg font-semibold disabled:opacity-50 hover:bg-purple-700 transition"
+                                >
+                                    ${tutorialStep === steps.length - 1 ? 'Finalizar' : 'Siguiente'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                contentHTML = '<div class="p-8 text-center text-red-500">Sección no encontrada</div>';
+            }
+
+            return contentHTML;
+        };
+
+        // --- FUNCIÓN DE RENDERIZADO PRINCIPAL (Actualiza el DOM) ---
+        const renderApp = () => {
+            const app = document.getElementById('app');
+
+            // Definición de enlaces de navegación, ajustados al ACA final
+            const navLinks = [
+                { id: 'inicio', label: 'Inicio', icon: 'BookOpen' }, 
+                { id: 'normas', label: 'Normas y Modelos', icon: 'FileText' },
+                { id: 'metricas', label: 'Métricas Téc.', icon: 'BarChart3' }, 
+                { id: 'evaluacion', label: 'Evaluación ISO', icon: 'Calculator' }, 
+                { id: 'resultados', label: 'Resultados Hist.', icon: 'TrendingUp' }, 
+                { id: 'recomendaciones', label: 'Recomendaciones', icon: 'Target' }, 
+                { id: 'video', label: 'video', icon: 'Video' },
+                { id: 'pruebas', label: 'Pruebas', icon: 'GraduationCap' }
+            ];
+
+            const navItemsDesktop = navLinks.map(({ id, label, icon }) => `
+                <button
+                    onclick="setActiveSectionAndRender('${id}')"
+                    class="flex items-center px-3 py-2 rounded-xl text-xs font-medium transition 
+                    ${activeSection === id 
+                        ? 'bg-blue-600 text-white shadow-lg' 
+                        : 'text-gray-700 hover:bg-gray-200'}"
+                >
+                    ${getIconSVG(icon, 18, 'mr-1')} ${label}
+                </button>
+            `).join('');
+
+            const navItemsMobile = navLinks.map(({ id, label, icon }) => `
+                <button
+                    onclick="setActiveSectionAndRender('${id}')"
+                    class="flex items-center w-full text-left px-4 py-3 rounded-lg mb-2 text-lg font-medium transition 
+                    ${activeSection === id ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}"
+                >
+                    ${getIconSVG(icon, 20, 'mr-3')} ${label}
+                </button>
+            `).join('');
+
+
+            app.innerHTML = `
+                <nav class="bg-white shadow-xl sticky top-0 z-50">
+                    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                        <div class="flex justify-between items-center py-4">
+                            <h1 class="text-xl sm:text-2xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600">
+                                ${getIconSVG('GraduationCap', 28, 'inline mr-2')} S.I.I.E.
+                            </h1>
+
+                            <button
+                                onclick="toggleMenu()"
+                                class="md:hidden p-2 text-gray-600 hover:text-blue-600 rounded-full transition"
+                            >
+                                ${menuOpen ? getIconSVG('X', 28) : getIconSVG('Menu', 28)}
+                            </button>
+
+                            <div class="hidden md:flex space-x-1">
+                                ${navItemsDesktop}
+                            </div>
+                        </div>
+
+                        ${menuOpen ? `
+                            <div class="md:hidden pb-4">
+                                ${navItemsMobile}
+                            </div>
+                        ` : ''}
+                    </div>
+                </nav>
+
+                <main class="max-w-7xl mx-auto py-8">
+                    ${renderContent()}
+                </main>
+                
+                <footer class="w-full bg-white shadow-inner p-4 mt-8 text-center text-gray-500 text-sm">
+                    Desarrollado para la Evaluacion de Calidad de Software | ID de Usuario: ${userId || 'Cargando...'}
+                </footer>
+            `;
+        };
+
+        // --- CORRECCIÓN CLAVE ---
+        // 1. Llamar a renderApp() inmediatamente para dibujar la estructura inicial (Header y Footer).
+        // 2. Llamar a initializeFirebase para manejar la autenticación y la carga de datos.
+        
+        renderApp(); // Dibuja la estructura base inmediatamente.
+        window.onload = initializeFirebase; // Inicializa Firebase después de que el DOM esté listo.
+        
+        // --- FIN DE CORRECCIÓN ---
+    </script>
+</body>
+</html>
