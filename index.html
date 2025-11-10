@@ -95,6 +95,8 @@
             return `artifacts/${appId}/public/data/evaluations`;
         };
 
+        window.firebaseConfig = firebaseConfig;
+
         async function initializeFirebase() {
             if (!firebaseConfig) {
                 console.error("Firebase configuration is missing.");
