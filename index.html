@@ -853,8 +853,12 @@
         // 1. Llamar a renderApp() inmediatamente para dibujar la estructura inicial (Header y Footer).
         // 2. Llamar a initializeFirebase para manejar la autenticación y la carga de datos.
         
-        renderApp(); // Dibuja la estructura base inmediatamente.
-        window.onload = initializeFirebase; // Inicializa Firebase después de que el DOM esté listo.
+        renderApp();
+
+        // Ejecutar cuando el DOM esté listo y el módulo cargado
+        document.addEventListener("DOMContentLoaded", () => {
+        initializeFirebase();
+        }); // Inicializa Firebase después de que el DOM esté listo.
         
         // --- FIN DE CORRECCIÓN ---
     </script>
